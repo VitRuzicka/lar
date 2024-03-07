@@ -64,7 +64,7 @@ def pull_out():
         rate.sleep()
 
 def main():
-    #TODO: add waiting for buttonpress
+    #TODO: add waiting for buttonpres
     global turtle
     global bumper
     turtle = Turtlebot(pc=True)
