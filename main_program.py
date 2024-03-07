@@ -16,7 +16,7 @@ linear_vel = 0.3
 angular_vel = 0.4
 
 WINDOW = 'obstacles'
-DRIVE = False
+DRIVE = True
 
 
 running = True
@@ -73,6 +73,8 @@ def pull_out():
         turtle.cmd_velocity(linear=0)
         print("sending command")
         rate.sleep()
+
+
 def colorMask(turtle): #function to detect the color of obstacles and return masked frame
 
     global frame
@@ -131,7 +133,23 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     if centroid_red:
         cv2.circle(combined_highlight, centroid_red, 5, (0, 140, 255), -1)  # Red dot
     # Display the resulting frame
-    return combined_highlight
+    return combined_highlight, centroid_blue, centroid_red
+
+
+def centeringPoles(blue, red): #function centers poles with robots trajectory
+    correction = []
+    if 0 <= (int(blue[0]+red[0])/2) <= 210:
+        correction = [0.5, 1]
+        print("Centering right")
+    elif 430 <= (int(blue[0]+red[0])/2) <= 640:
+        correction = [0.5, -1]
+        print("Centering left")
+    else: 
+        correction = [1,0]
+        print("No centering")
+
+    return correction    
+
 
 def main():
     global turtle
@@ -185,7 +203,8 @@ def main():
 
         # show image
         #cv2.imshow(WINDOW, im_color)  #depth mask
-        cv2.imshow(WINDOW, colorMask(turtle))#
+        maskaVole, centroid_blue, centroid_red = colorMask(turtle) 
+        cv2.imshow(WINDOW, maskaVole)
         cv2.waitKey(1)
 
         # check obstacle
@@ -201,19 +220,30 @@ def main():
             dist = np.percentile(data, 10)
             if dist < 0.6:
                 state = ROTATE
+                
+        
         if DRIVE:
             # command velocity
             if active and state == MOVE:
-                turtle.cmd_velocity(linear=linear_vel)
+                if centroid_blue and centroid_red:
+                    corr = centeringPoles(centroid_blue, centroid_red)
+                else: corr = [1,0]
+                turtle.cmd_velocity(linear=linear_vel*corr[0], angular=corr[1]*0.4)
                 direction = None
 
             # ebstacle based rotation
             elif active and state == ROTATE:
+                #if centroid_red[0] > centroid_blue[0]:
+                #    direction = 1
+                #elif centroid_red[0] < centroid_blue[0]: 
+                #    direction = -1
                 if direction is None:
-                    direction = np.sign(np.random.rand() - 0.5)
+                    direction = np.sign(np.random.rand() - 0.5)    
                 turtle.cmd_velocity(angular=direction*angular_vel)
         
 
+#TODO: Doodle with stopping distance when reaching poles
+#      Toggling rotate function when reaching poles, now it oscilates due to centeringPoles
 
 if __name__ == '__main__':
     main()
