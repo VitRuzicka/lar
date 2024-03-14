@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+# TODO: dont convert depth mask to int
+# make sure the depth map has y,x coordinates intead of x, y
+# make 
+
 
 from __future__ import print_function
 
@@ -12,15 +16,24 @@ import time
 MOVE = 1
 ROTATE = 2
 
-linear_vel = 0.3
-angular_vel = 0.4
+linear_vel = 0.2
+angular_vel = 0.35
 
 WINDOW = 'obstacles'
-DRIVE = True
+WINDOW2 = 'mask'
+DRIVE = False  #disables the movement of the robot
+
+DEPTH_HYST = 30 #bulgarian constant for detecting if the poles belong together
+DEPTH_THR = 30  #threshold for stopping before obstacles
+
+SLOW_SPEED = 0.5
+DONT_LOOK_THR = 3500 #1500ms since detecting the last pole starts detecting again
+SLOWING_THRESH = 40
+P_FACTOR = 1.3
 
 
+life_phase = "searching"  #liofe phase of the robot 
 running = True
-active = True
 bumper = False
 start = False
 frame = []
@@ -87,10 +100,10 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     # Define range of red color in HSV
-    lower_red1 = np.array([0, 120, 70])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 120, 70])
-    upper_red2 = np.array([180, 255, 255])
+    lower_red1 = np.array([0, 150, 70])  # 0, 150, 70
+    upper_red1 = np.array([8, 255, 255]) # 10, 255, 255
+    lower_red2 = np.array([170, 120, 70]) # 170, 120, 70
+    upper_red2 = np.array([180, 255, 255])  # 180, 255, 255
 
     # Define range of blue color in HSV
     lower_blue = np.array([90, 150, 0])
@@ -99,8 +112,16 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     # Threshold the HSV image to get only red and blue colors
     mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
+
     mask_red = cv2.bitwise_or(mask_red1, mask_red2)
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+
+    ignore_mask = np.zeros(frame.shape[:2], dtype="uint8")  # Start with a completely black mask
+    cv2.rectangle(ignore_mask, (0, int(frame.shape[0] * 0.25)), (frame.shape[1], frame.shape[0]), 255, -1)  # Add a white rectangle covering the lower 3/4 of the mask
+
+    # Apply the ignore mask to the color masks
+    mask_red = cv2.bitwise_and(mask_red, mask_red, mask=ignore_mask)
+    mask_blue = cv2.bitwise_and(mask_blue, mask_blue, mask=ignore_mask)
 
     # Bitwise-AND mask and original image to highlight the colors
     red_highlight = cv2.bitwise_and(frame, frame, mask=mask_red)
@@ -125,38 +146,99 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     centroid_blue = find_centroid(max(contours_blue, key=cv2.contourArea)) if contours_blue else None
     centroid_red = find_centroid(max(contours_red, key=cv2.contourArea)) if contours_red else None
 
-    print("centroid red "+ str(centroid_red))
-    print("centroid blue "+ str(centroid_blue))
+    # print("centroid red "+ str(centroid_red))
+    # print("centroid blue "+ str(centroid_blue))
 
     if centroid_blue:
-        cv2.circle(combined_highlight, centroid_blue, 5, (255, 0, 0), -1)  # Blue dot
+        cv2.circle(frame, centroid_blue, 5, (255, 0, 0), -1)  #combined_highlight Blue dot
     if centroid_red:
-        cv2.circle(combined_highlight, centroid_red, 5, (0, 140, 255), -1)  # Red dot
+        cv2.circle(frame, centroid_red, 5, (0, 140, 255), -1)  # Red dot
     # Display the resulting frame
-    return combined_highlight, centroid_blue, centroid_red
+    return frame, centroid_blue, centroid_red
 
 
-def centeringPoles(blue, red): #function centers poles with robots trajectory
-    correction = []
-    if 0 <= (int(blue[0]+red[0])/2) <= 210:
-        correction = [0.5, 1]
-        print("Centering right")
-    elif 430 <= (int(blue[0]+red[0])/2) <= 640:
-        correction = [0.5, -1]
-        print("Centering left")
-    else: 
-        correction = [1,0]
-        print("No centering")
-
+def centeringPoles(blue, red): #function centers poles with robot's trajectory
+    correction = [0,0]
+    FRAME = 640/2
+    error = (red[0] + blue[0])/2
+    error = (FRAME - error ) * P_FACTOR
+    correction[0] = 1
+    correction[1] = error/320
     return correction    
 
+def calcDepthAvg(depth_image, centroid): # calculates the distance of one centroid from the depth map
+    # Define the size of the area to sample around the centroid
+    sample_size = 3  # A 3x3 area
+    half_size = sample_size // 2
+
+    # Initialize variables to calculate the average
+    depth_sum = 0
+    count = 0
+
+    # Calculate the bounds of the sample area, ensuring they are within the image
+    start_x = max(0, centroid[0] - half_size)
+    end_x = min(depth_image.shape[1], centroid[0] + half_size + 1)
+    start_y = max(0, centroid[1] - half_size)
+    end_y = min(depth_image.shape[0], centroid[1] + half_size + 1)
+
+    # Sum up the depth values within the sample area and count the number of valid points
+    for y in range(start_y, end_y):
+        for x in range(start_x, end_x):
+            depth = depth_image[y, x]   #TODO CHECK THIS
+            if depth > 0:  # Check to ensure depth is valid (non-zero)
+                depth_sum += depth
+                count += 1
+
+    # Calculate the average depth if there are any valid points
+    if count > 0:
+        return depth_sum / count
+    else:
+        return None
+
+def centroidDist(depth_image, centroid_blue, centroid_red ):
+    # Initialize a list to hold the average depth values for each centroid
+    depths = []
+
+    # Calculate the average depth around the blue centroid if it exists
+    if centroid_blue and centroid_red:
+        depth_blue = calcDepthAvg(depth_image, centroid_blue)
+        depth_red = calcDepthAvg(depth_image, centroid_red)
+        
+        print(centroid_red, depth_image[centroid_red[1], centroid_red[0]])
+
+        if depth_blue != None and depth_red != None and  abs(depth_blue - depth_red) < DEPTH_HYST:
+            return (depth_blue + depth_red) / 2
+        else:
+            return None
+def writeInfo(frame):  #write information on the video feed
+    font = cv2.FONT_HERSHEY_SIMPLEX  # Font type
+    position = (230, 450)  # Text position (bottom-left corner)
+    font_scale = 1  # Font scale (font size)
+    color = (0, 0, 255)  # Text color in BGR (blue, green, red)
+    thickness = 5  # Text thickness
+
+    # Put the text on the frame
+    cv2.putText(frame, life_phase, position, font, font_scale, color, thickness)
+    return frame
+def checkDir(centroid_blue, centroid_red): #check which way are the poles oriented for rotating the robot
+    if centroid_blue and centroid_red:
+        if centroid_red[0] > centroid_blue[0]:  #red on the right -> drive right
+            direction = -1
+        elif centroid_red[0] < centroid_blue[0]: 
+            direction = 1
+    return direction
+def millis():
+    return round(time.time() * 1000)
 
 def main():
     global turtle
     global bumper
     global start
-
-
+    global life_phase
+    last_pole_time = 2000 # last depth of detected poles before ROTATE
+    corr = [1,0]  #default val
+    state = ROTATE #state machine to control the movement of the robot
+    direction = 1
     turtle = Turtlebot(pc=True, rgb=True)
     turtle.register_bumper_event_cb(bumper_cb)
     turtle.register_button_event_cb(button_cb)
@@ -167,6 +249,7 @@ def main():
     print('First point cloud recieved ...')
 
     cv2.namedWindow(WINDOW)
+    cv2.namedWindow(WINDOW2)
     cv2.setMouseCallback(WINDOW, click)
     turtle.play_sound(0) #play the sound - ready
 
@@ -185,60 +268,70 @@ def main():
        
         # mask out floor points
         mask = pc[:, :, 1] < 0.2
-
         # mask point too far
-        mask = np.logical_and(mask, pc[:, :, 2] < 3.0)
+        mask = np.logical_and(mask, pc[:, :, 2] < 3) #the camera doesnt see further than 2.5m
 
         #if np.count_nonzero(mask) <= 0:
         #    print('All point are too far ...')
         #    continue
 
         # empty image
-        image = np.zeros(mask.shape)
+        depth_image = np.zeros(mask.shape)
 
         # assign depth i.e. distance to image
-        image[mask] = np.int8(pc[:, :, 2][mask] / 3.0 * 255)
-        im_color = cv2.applyColorMap(255 - image.astype(np.uint8),
-                                     cv2.COLORMAP_JET)
-
+        depth_image[mask] = np.int8(pc[:, :, 2][mask] / 3 * 255)
+        #im_color = cv2.applyColorMap(255 - image.astype(np.uint8), cv2.COLORMAP_JET)
         # show image
-        #cv2.imshow(WINDOW, im_color)  #depth mask
+        cv2.imshow(WINDOW, depth_image)  #depth mask
         maskaVole, centroid_blue, centroid_red = colorMask(turtle) 
-        cv2.imshow(WINDOW, maskaVole)
+        maskaVole = writeInfo(maskaVole)
+        cv2.imshow(WINDOW2, maskaVole)
         cv2.waitKey(1)
 
         # check obstacle
-        mask = np.logical_and(mask, pc[:, :, 1] > -0.2)
-        data = np.sort(pc[:, :, 2][mask])
+        #mask = np.logical_and(mask, pc[:, :, 1] > -0.2)
+        #data = np.sort(pc[:, :, 2][mask])
         if bumper:
-            bumper = False
-            #pull_out()
             exit() #exit the program
 
-        state = MOVE
-        if data.size > 50:
-            dist = np.percentile(data, 10)
-            if dist < 0.6:
-                state = ROTATE
-                
         
+        # if data.size > 50:   #old piece of code that rotated the bot when he came close to obstacle
+        #     dist = np.percentile(data, 10)
+        #     if dist < 0.6:
+        #         state = ROTATE
+        dont_look = 1 if (millis() - last_pole_time) < DONT_LOOK_THR else 0
+        #our brand new shity code, supported by: chatgpt
+        if centroid_blue and centroid_red: #centroids detected
+            depth = centroidDist(depth_image, centroid_blue, centroid_red)
+            if state != ROTATE:
+                corr = centeringPoles(centroid_blue, centroid_red) #correct the drunk robot   
+            if depth != None: #the depth of the centroids is invalid
+                print("depth: ", depth, " centering: ", corr)
+                if state == MOVE:
+
+                    if depth < SLOWING_THRESH:
+                        corr[0] = SLOW_SPEED 
+                        print("slowing down")
+                    if depth < DEPTH_THR: #close to the obstacle, switch the state machine
+                        last_pole_time = millis() #save the last depth so the robot doesnt follow the old poles
+                        state = ROTATE
+                        direction = checkDir(centroid_blue, centroid_red) #sets the direction based on orientation of poles
+                        life_phase = "turning"
+                        print("ready to rotate", direction)
+                    
+                elif state == ROTATE and not dont_look :  #need to exit the rotation somehow, dont look is protection interval
+                    if depth : #new poles detected, stop the rotation
+                        state = MOVE
+
+
         if DRIVE:
             # command velocity
-            if active and state == MOVE:
-                if centroid_blue and centroid_red:
-                    corr = centeringPoles(centroid_blue, centroid_red)
-                else: corr = [1,0]
-                turtle.cmd_velocity(linear=linear_vel*corr[0], angular=corr[1]*0.4)
-                direction = None
+            if state == MOVE: #see the centroids so move in their dir
+                life_phase = "moving to poles"
+                turtle.cmd_velocity(linear=linear_vel*corr[0], angular=corr[1])
 
             # ebstacle based rotation
-            elif active and state == ROTATE:
-                #if centroid_red[0] > centroid_blue[0]:
-                #    direction = 1
-                #elif centroid_red[0] < centroid_blue[0]: 
-                #    direction = -1
-                if direction is None:
-                    direction = np.sign(np.random.rand() - 0.5)    
+            elif state == ROTATE:
                 turtle.cmd_velocity(angular=direction*angular_vel)
         
 
