@@ -100,20 +100,16 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     # Define range of red color in HSV
-    lower_red1 = np.array([0, 150, 70])  # 0, 150, 70
+    lower_red1 = np.array([0, 150, 100])  # 0, 150, 70
     upper_red1 = np.array([8, 255, 255]) # 10, 255, 255
-    lower_red2 = np.array([170, 120, 70]) # 170, 120, 70
-    upper_red2 = np.array([180, 255, 255])  # 180, 255, 255
 
     # Define range of blue color in HSV
     lower_blue = np.array([90, 150, 100])
     upper_blue = np.array([140, 255, 255])
 
     # Threshold the HSV image to get only red and blue colors
-    mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask_red = cv2.inRange(hsv, lower_red1, upper_red1)
 
-    mask_red = cv2.bitwise_or(mask_red1, mask_red2)
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
 
     ignore_mask = np.zeros(frame.shape[:2], dtype="uint8")  # Start with a completely black mask
@@ -255,7 +251,7 @@ def main():
 
     cv2.namedWindow(WINDOW)
     cv2.namedWindow(WINDOW2)
-    cv2.setMouseCallback(WINDOW, click)
+    cv2.setMouseCallback(WINDOW2, click)
     turtle.play_sound(0) #play the sound - ready
 
     # while not start:  #wait for the user to start the robot
