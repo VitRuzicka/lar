@@ -21,15 +21,15 @@ angular_vel = 0.35
 
 WINDOW = 'obstacles'
 WINDOW2 = 'mask'
-DRIVE = False  #disables the movement of the robot
+DRIVE = True  #disables the movement of the robot
 
-DEPTH_HYST = 30 #bulgarian constant for detecting if the poles belong together
-DEPTH_THR = 30  #threshold for stopping before obstacles
+DEPTH_HYST = 40 #bulgarian constant for detecting if the poles belong together
+DEPTH_THR = 35  #threshold for stopping before obstacles
 
 SLOW_SPEED = 0.5
-DONT_LOOK_THR = 3500 #1500ms since detecting the last pole starts detecting again
-SLOWING_THRESH = 40
-P_FACTOR = 1.3
+DONT_LOOK_THR = 3000 #1500ms since detecting the last pole starts detecting again
+SLOWING_THRESH = 80  #distance at which the robot starts slowing down before poles
+P_FACTOR = 0.8
 
 
 life_phase = "searching"  #liofe phase of the robot 
@@ -106,7 +106,7 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     upper_red2 = np.array([180, 255, 255])  # 180, 255, 255
 
     # Define range of blue color in HSV
-    lower_blue = np.array([90, 150, 0])
+    lower_blue = np.array([90, 150, 100])
     upper_blue = np.array([140, 255, 255])
 
     # Threshold the HSV image to get only red and blue colors
@@ -150,20 +150,26 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     # print("centroid blue "+ str(centroid_blue))
 
     if centroid_blue:
-        cv2.circle(frame, centroid_blue, 5, (255, 0, 0), -1)  #combined_highlight Blue dot
+        cv2.circle(combined_highlight, centroid_blue, 5, (255, 0, 0), -1)  #combined_highlight Blue dot
     if centroid_red:
-        cv2.circle(frame, centroid_red, 5, (0, 140, 255), -1)  # Red dot
+        cv2.circle(combined_highlight, centroid_red, 5, (0, 140, 255), -1)  # Red dot
     # Display the resulting frame
-    return frame, centroid_blue, centroid_red
+    return combined_highlight, centroid_blue, centroid_red
 
 
-def centeringPoles(blue, red): #function centers poles with robot's trajectory
+def centeringPoles(blue, red, slow): #function centers poles with robot's trajectory
     correction = [0,0]
     FRAME = 640/2
     error = (red[0] + blue[0])/2
     error = (FRAME - error ) * P_FACTOR
-    correction[0] = 1
     correction[1] = error/320
+    #either go full speed or crawl to poles
+    if(not slow):
+        correction[0] = 1
+        print("speeding up")
+    else:
+        correction[0] = SLOW_SPEED
+        print("turtle mode")
     return correction    
 
 def calcDepthAvg(depth_image, centroid): # calculates the distance of one centroid from the depth map
@@ -204,10 +210,11 @@ def centroidDist(depth_image, centroid_blue, centroid_red ):
         depth_blue = calcDepthAvg(depth_image, centroid_blue)
         depth_red = calcDepthAvg(depth_image, centroid_red)
         
-        print(centroid_red, depth_image[centroid_red[1], centroid_red[0]])
+        print("Centroid red: ", centroid_red, depth_image[centroid_red[1], centroid_red[0]])
+        print("Centroid blue: ", centroid_blue, depth_image[centroid_blue[1], centroid_blue[0]])
 
-        if depth_blue != None and depth_red != None and  abs(depth_blue - depth_red) < DEPTH_HYST:
-            return (depth_blue + depth_red) / 2
+        if depth_blue != None and depth_red != None and  abs(depth_blue - depth_red) < DEPTH_HYST:  #if the poles belong together depth wise
+            return min(depth_blue,depth_red)
         else:
             return None
 def writeInfo(frame):  #write information on the video feed
@@ -235,6 +242,7 @@ def main():
     global bumper
     global start
     global life_phase
+    slowing_down = False
     last_pole_time = 2000 # last depth of detected poles before ROTATE
     corr = [1,0]  #default val
     state = ROTATE #state machine to control the movement of the robot
@@ -243,10 +251,7 @@ def main():
     turtle.register_bumper_event_cb(bumper_cb)
     turtle.register_button_event_cb(button_cb)
 
-    print('Waiting for point cloud ...')
     turtle.wait_for_point_cloud()
-    direction = None
-    print('First point cloud recieved ...')
 
     cv2.namedWindow(WINDOW)
     cv2.namedWindow(WINDOW2)
@@ -276,10 +281,10 @@ def main():
         #    continue
 
         # empty image
-        depth_image = np.zeros(mask.shape)
-
+        #depth_image = np.zeros(mask.shape)  #old far points are being marked as 0
+        depth_image = np.full(mask.shape, 255, dtype=np.uint8)
         # assign depth i.e. distance to image
-        depth_image[mask] = np.int8(pc[:, :, 2][mask] / 3 * 255)
+        depth_image[mask] = np.uint8(pc[:, :, 2][mask] / 3 * 255)
         #im_color = cv2.applyColorMap(255 - image.astype(np.uint8), cv2.COLORMAP_JET)
         # show image
         cv2.imshow(WINDOW, depth_image)  #depth mask
@@ -304,25 +309,24 @@ def main():
         if centroid_blue and centroid_red: #centroids detected
             depth = centroidDist(depth_image, centroid_blue, centroid_red)
             if state != ROTATE:
-                corr = centeringPoles(centroid_blue, centroid_red) #correct the drunk robot   
-            if depth != None: #the depth of the centroids is invalid
-                print("depth: ", depth, " centering: ", corr)
+                corr = centeringPoles(centroid_blue, centroid_red, slowing_down) #correct the drunk robot   
+            if depth != None : #the depth of the centroids is invalid
+                #print("depth: ", depth, " centering: ", corr)
                 if state == MOVE:
-
-                    if depth < SLOWING_THRESH:
-                        corr[0] = SLOW_SPEED 
-                        print("slowing down")
+                    print("correction: ", corr, depth, slowing_down)
+                    if (depth < SLOWING_THRESH) :
+                        slowing_down = True
                     if depth < DEPTH_THR: #close to the obstacle, switch the state machine
                         last_pole_time = millis() #save the last depth so the robot doesnt follow the old poles
                         state = ROTATE
                         direction = checkDir(centroid_blue, centroid_red) #sets the direction based on orientation of poles
                         life_phase = "turning"
-                        print("ready to rotate", direction)
+                        print("beginning rotation rotate", direction)
+                        slowing_down = False
                     
                 elif state == ROTATE and not dont_look :  #need to exit the rotation somehow, dont look is protection interval
-                    if depth : #new poles detected, stop the rotation
-                        state = MOVE
-
+                    #if centroid_blue and centroid_red: #new poles detected, stop the rotation
+                    state = MOVE
 
         if DRIVE:
             # command velocity
