@@ -9,12 +9,14 @@ from __future__ import print_function
 import cv2
 
 import numpy as np
+from math import *
 
 from robolab_turtlebot import Turtlebot, Rate, get_time, detector
 import time
 
 MOVE = 1
 ROTATE = 2
+CORIGATING = 3
 
 linear_vel = 0.2
 angular_vel = 0.35
@@ -28,11 +30,21 @@ DEPTH_THR = 35  #threshold for stopping before obstacles
 
 SLOW_SPEED = 0.5
 DONT_LOOK_THR = 3000 #1500ms since detecting the last pole starts detecting again
-SLOWING_THRESH = 80  #distance at which the robot starts slowing down before poles
+SLOWING_THRESH = 80  #distance at which the robot starts slowing down before poles 
+POLE_DIST_THRESH = 15  #threshold for dist between poles (in cm) 
+CORRECTED = 0.2  #threshold to detect when to stop centering
+
+
+BOOST = 2
 P_FACTOR = 0.8
+CAM_FOV = 86
+DEG2RAD = 3.1415/180.0
+RAD2DEG = 1/DEG2RAD
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 480
 
 
-life_phase = "searching"  #liofe phase of the robot 
+life_phase = "first"  #liofe phase of the robot 
 running = True
 bumper = False
 start = False
@@ -64,28 +76,6 @@ def button_cb(msg):
     global start
     if msg.button == 0 and msg.state == 1:
         start = True
-
-def pull_out():
-    rate = Rate(10)
-    t = get_time()
-
-    while get_time() - t < .5:
-        turtle.cmd_velocity(linear=0)
-        print("sending command")
-        rate.sleep()
-
-    t = get_time()
-
-    while get_time() - t < 2:
-        turtle.cmd_velocity(linear=-0.1, angular=.8)
-        print("sending command")
-        rate.sleep()
-    t = get_time()
-
-    while get_time() - t < .5:
-        turtle.cmd_velocity(linear=0)
-        print("sending command")
-        rate.sleep()
 
 
 def colorMask(turtle): #function to detect the color of obstacles and return masked frame
@@ -197,22 +187,33 @@ def calcDepthAvg(depth_image, centroid): # calculates the distance of one centro
     else:
         return None
 
+def centroidParams(depth_image, centroid_blue, centroid_red): #return the calculated values of poles 
+    if centroid_blue and centroid_red:
+        depth_blue = calcDepthAvg(depth_image, centroid_blue)
+        depth_red = calcDepthAvg(depth_image, centroid_red)
+        #calculate the distance between pole and center of view
+        angles = ( abs(FRAME_WIDTH/2-centroid_blue[0])/320.0*(CAM_FOV/2)  ,   abs(FRAME_WIDTH/2-centroid_red[0])/320.0*(CAM_FOV/2) )
+        #projected dist of the poles
+        distances = ( min(depth_blue, depth_red)*sin(angles[0]*DEG2RAD), min(depth_blue,depth_red)*sin(angles[1]*DEG2RAD) )  #chose distance acc to the closest pole (direct projection)
+        #angle between the center of poles viewed from above compared to tangent line of the front of the robot
+        paralel_angle = atan( abs(depth_blue-depth_red) / abs(distances[0]-distances[1]) )   #calculates the real distance between poles
+        
+        print("found poles, angles:", angles, " dist:", abs(distances[0] - distances[1]) )
+        print("angle between poles", paralel_angle*RAD2DEG)
+        return(angles, distances, paralel_angle, depth_blue, depth_red)
+    return None
+
 def centroidDist(depth_image, centroid_blue, centroid_red ):
     # Initialize a list to hold the average depth values for each centroid
     depths = []
 
     # Calculate the average depth around the blue centroid if it exists
-    if centroid_blue and centroid_red:
-        depth_blue = calcDepthAvg(depth_image, centroid_blue)
-        depth_red = calcDepthAvg(depth_image, centroid_red)
-        
-        print("Centroid red: ", centroid_red, depth_image[centroid_red[1], centroid_red[0]])
-        print("Centroid blue: ", centroid_blue, depth_image[centroid_blue[1], centroid_blue[0]])
+    angles , distances , angles, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
 
-        if depth_blue != None and depth_red != None and  abs(depth_blue - depth_red) < DEPTH_HYST:  #if the poles belong together depth wise
+    if abs(distances[0] - distances[1]) < POLE_DIST_THRESH: #detect if the centroids belong together based on distance
+        if depth_blue != None and depth_red != None and  abs(depth_blue - depth_red) < DEPTH_HYST:  # detect if the poles belong together based on depth
             return min(depth_blue,depth_red)
-        else:
-            return None
+    return None
 def writeInfo(frame):  #write information on the video feed
     font = cv2.FONT_HERSHEY_SIMPLEX  # Font type
     position = (230, 450)  # Text position (bottom-left corner)
@@ -247,6 +248,8 @@ def main():
     turtle.register_bumper_event_cb(bumper_cb)
     turtle.register_button_event_cb(button_cb)
 
+    turtle.reset_odometry()
+
     turtle.wait_for_point_cloud()
 
     cv2.namedWindow(WINDOW)
@@ -265,16 +268,13 @@ def main():
             print('No point cloud')
             continue
         
-
-       
+        if bumper:
+            exit() #exit the program
+        
         # mask out floor points
         mask = pc[:, :, 1] < 0.2
         # mask point too far
         mask = np.logical_and(mask, pc[:, :, 2] < 3) #the camera doesnt see further than 2.5m
-
-        #if np.count_nonzero(mask) <= 0:
-        #    print('All point are too far ...')
-        #    continue
 
         # empty image
         #depth_image = np.zeros(mask.shape)  #old far points are being marked as 0
@@ -289,54 +289,70 @@ def main():
         cv2.imshow(WINDOW2, maskaVole)
         cv2.waitKey(1)
 
-        # check obstacle
-        #mask = np.logical_and(mask, pc[:, :, 1] > -0.2)
-        #data = np.sort(pc[:, :, 2][mask])
-        if bumper:
-            exit() #exit the program
-
         
-        # if data.size > 50:   #old piece of code that rotated the bot when he came close to obstacle
-        #     dist = np.percentile(data, 10)
-        #     if dist < 0.6:
-        #         state = ROTATE
-        dont_look = 1 if (millis() - last_pole_time) < DONT_LOOK_THR else 0
-        #our brand new shity code, supported by: chatgpt
-        if centroid_blue and centroid_red: #centroids detected
-            depth = centroidDist(depth_image, centroid_blue, centroid_red)
-            if state != ROTATE:
-                corr = centeringPoles(centroid_blue, centroid_red, slowing_down) #correct the drunk robot   
-            if depth != None : #the depth of the centroids is invalid
-                #print("depth: ", depth, " centering: ", corr)
-                if state == MOVE:
-                    print("correction: ", corr, depth, slowing_down)
-                    if (depth < SLOWING_THRESH) :
-                        slowing_down = True
-                    if depth < DEPTH_THR: #close to the obstacle, switch the state machine
-                        last_pole_time = millis() #save the last depth so the robot doesnt follow the old poles
-                        state = ROTATE
-                        direction = checkDir(centroid_blue, centroid_red) #sets the direction based on orientation of poles
-                        life_phase = "turning"
-                        print("beginning rotation rotate", direction)
-                        slowing_down = False
-                    
-                elif state == ROTATE and not dont_look :  #need to exit the rotation somehow, dont look is protection interval
-                    #if centroid_blue and centroid_red: #new poles detected, stop the rotation
-                    state = MOVE
-
+        
         if DRIVE:
             # command velocity
+            #life_phase = "moving to poles"
             if state == MOVE: #see the centroids so move in their dir
-                life_phase = "moving to poles"
+                #our brand new shity code, supported by: chatgpt
+                if centroid_blue and centroid_red : #centroids detected
+                    depth = centroidDist(depth_image, centroid_blue, centroid_red)
+                    if state != ROTATE:
+                        corr = centeringPoles(centroid_blue, centroid_red, slowing_down) #correct the drunk robot   
+                    if depth != None : #the depth of the centroids is invalid
+                        #print("depth: ", depth, " centering: ", corr)
+                        if state == MOVE:
+                            #print("correction: ", corr, depth, slowing_down)
+                            if (depth < SLOWING_THRESH) :
+                                slowing_down = True
+                            if depth < DEPTH_THR: #close to the obstacle, switch the state machine
+                                state = ROTATE
+                                direction = checkDir(centroid_blue, centroid_red) #sets the direction based on orientation of poles
+                                life_phase = "turning"
+                                print("beginning rotation rotate", direction)
+                                slowing_down = False
+                                turtle.reset_odometry()
+                                time.sleep(0.1)
+                    else: 
+                        print("Poles jsou daleko, seru na tebe")
+                        
+                
                 turtle.cmd_velocity(linear=linear_vel*corr[0], angular=corr[1])
 
             # ebstacle based rotation
             elif state == ROTATE:
-                turtle.cmd_velocity(angular=direction*angular_vel)
-        
+                if life_phase == "first":
+                    turtle.cmd_velocity(linear=0, angular=direction*angular_vel)
 
-#TODO: Doodle with stopping distance when reaching poles
-#      Toggling rotate function when reaching poles, now it oscilates due to centeringPoles
+                    if centroid_blue and centroid_red : #centroids detected
+                        state = MOVE
+                        life_phase = "moving to poles"
+
+                elif life_phase == "turning":
+                    while not turtle.is_shutting_down():
+                        tacho = turtle.get_odometry()
+                        #print(tacho)
+                        if(abs(tacho[2]) < 3*pi/10):
+                            turtle.cmd_velocity(linear=0, angular=direction*angular_vel)
+                        else:
+                            break
+
+                    state = CORIGATING
+                    life_phase = "corigating"
+
+            elif state == CORIGATING: #turn in the direction of the poles but dont move, check their angle
+                if centroid_blue and centroid_red : #centroids detected
+                    depth = centroidDist(depth_image, centroid_blue, centroid_red)
+                    corr = centeringPoles(centroid_blue, centroid_red, slowing_down) #correct the drunk robot   
+                    turtle.cmd_velocity(linear=0, angular=corr[1]*angular_vel*BOOST)
+                    if(corr[1] < CORRECTED):  #the robot is facing the poles
+                        #check for angle of the centers of poles compared to robot
+                        angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
+                        print("poles angle:", par_ang)
+                        state = MOVE
+                        life_phase = "moving to poles"
+        
 
 if __name__ == '__main__':
     main()
