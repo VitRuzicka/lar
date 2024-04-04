@@ -7,6 +7,7 @@
 from __future__ import print_function
 
 import cv2
+import sys
 
 import numpy as np
 from math import *
@@ -17,6 +18,9 @@ import time
 MOVE = 1
 ROTATE = 2
 CORIGATING = 3
+ANGLE_CORR = 4
+
+
 
 linear_vel = 0.2
 angular_vel = 0.35
@@ -26,16 +30,17 @@ WINDOW2 = 'mask'
 DRIVE = True  #disables the movement of the robot
 
 DEPTH_HYST = 40 #bulgarian constant for detecting if the poles belong together
-DEPTH_THR = 35  #threshold for stopping before obstacles
+DEPTH_THR = 40  #threshold for stopping before obstacles
 
 SLOW_SPEED = 0.5
 DONT_LOOK_THR = 3000 #1500ms since detecting the last pole starts detecting again
 SLOWING_THRESH = 80  #distance at which the robot starts slowing down before poles 
-POLE_DIST_THRESH = 15  #threshold for dist between poles (in cm) 
+POLE_DIST_THRESH = 20  #threshold for dist between poles (in cm) - they belong together or no  
 CORRECTED = 0.2  #threshold to detect when to stop centering
+PAR_ANGLE_THRESHOLD = 15  #threshold for deciding whether to correct for pole angle or not [in deg]
+RIDE_OUT_OF_COLLISION_DIST = 15  #distance to ride when running out of collision
 
-
-BOOST = 2
+BOOST = 4
 P_FACTOR = 0.8
 CAM_FOV = 86
 DEG2RAD = 3.1415/180.0
@@ -72,6 +77,7 @@ def bumper_cb(msg):
     if(msg.state == 1):
         print("bumped into wall")
         bumper = True
+        sys.exit()  #auf viedersehen
 def button_cb(msg):
     global start
     if msg.button == 0 and msg.state == 1:
@@ -136,11 +142,11 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     # print("centroid blue "+ str(centroid_blue))
 
     if centroid_blue:
-        cv2.circle(combined_highlight, centroid_blue, 5, (255, 0, 0), -1)  #combined_highlight Blue dot
+        cv2.circle(frame, centroid_blue, 5, (255, 0, 0), -1)  #combined_highlight Blue dot
     if centroid_red:
-        cv2.circle(combined_highlight, centroid_red, 5, (0, 140, 255), -1)  # Red dot
+        cv2.circle(frame, centroid_red, 5, (0, 140, 255), -1)  # Red dot
     # Display the resulting frame
-    return combined_highlight, centroid_blue, centroid_red
+    return frame, centroid_blue, centroid_red
 
 
 def centeringPoles(blue, red, slow): #function centers poles with robot's trajectory
@@ -152,10 +158,10 @@ def centeringPoles(blue, red, slow): #function centers poles with robot's trajec
     #either go full speed or crawl to poles
     if(not slow):
         correction[0] = 1
-        print("speeding up")
+        #print("speeding up")
     else:
         correction[0] = SLOW_SPEED
-        print("turtle mode")
+        #print("turtle mode")
     return correction    
 
 def calcDepthAvg(depth_image, centroid): # calculates the distance of one centroid from the depth map
@@ -198,8 +204,8 @@ def centroidParams(depth_image, centroid_blue, centroid_red): #return the calcul
         #angle between the center of poles viewed from above compared to tangent line of the front of the robot
         paralel_angle = atan( abs(depth_blue-depth_red) / abs(distances[0]-distances[1]) )   #calculates the real distance between poles
         
-        print("found poles, angles:", angles, " dist:", abs(distances[0] - distances[1]) )
-        print("angle between poles", paralel_angle*RAD2DEG)
+        #print("found poles, angles:", angles, " dist:", abs(distances[0] - distances[1]) )
+        #print("angle between poles", paralel_angle*RAD2DEG)
         return(angles, distances, paralel_angle, depth_blue, depth_red)
     return None
 
@@ -234,6 +240,7 @@ def checkDir(centroid_blue, centroid_red): #check which way are the poles orient
 def millis():
     return round(time.time() * 1000)
 
+
 def main():
     global turtle
     global bumper
@@ -244,6 +251,7 @@ def main():
     corr = [1,0]  #default val
     state = ROTATE #state machine to control the movement of the robot
     direction = 1
+    corrected_from_corigating = 0  #keep track of the angle when correcting the poles to center in standstill
     turtle = Turtlebot(pc=True, rgb=True)
     turtle.register_bumper_event_cb(bumper_cb)
     turtle.register_button_event_cb(button_cb)
@@ -289,8 +297,9 @@ def main():
         cv2.imshow(WINDOW2, maskaVole)
         cv2.waitKey(1)
 
-        
-        
+        if centroid_blue and centroid_red :
+            angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
+
         if DRIVE:
             # command velocity
             #life_phase = "moving to poles"
@@ -310,7 +319,7 @@ def main():
                                 state = ROTATE
                                 direction = checkDir(centroid_blue, centroid_red) #sets the direction based on orientation of poles
                                 life_phase = "turning"
-                                print("beginning rotation rotate", direction)
+                                print("beginning rotation in dir", direction)
                                 slowing_down = False
                                 turtle.reset_odometry()
                                 time.sleep(0.1)
@@ -320,7 +329,7 @@ def main():
                 
                 turtle.cmd_velocity(linear=linear_vel*corr[0], angular=corr[1])
 
-            # ebstacle based rotation
+            # rotate fixed 90deg
             elif state == ROTATE:
                 if life_phase == "first":
                     turtle.cmd_velocity(linear=0, angular=direction*angular_vel)
@@ -328,31 +337,112 @@ def main():
                     if centroid_blue and centroid_red : #centroids detected
                         state = MOVE
                         life_phase = "moving to poles"
+                        print("now moving to poles")
 
                 elif life_phase == "turning":
-                    while not turtle.is_shutting_down():
+                    print("turning 90deg")
+                    while not turtle.is_shutting_down():  #rotate 90 deg
                         tacho = turtle.get_odometry()
                         #print(tacho)
-                        if(abs(tacho[2]) < 3*pi/10):
+                        if(abs(tacho[2]) < 4*pi/10):
                             turtle.cmd_velocity(linear=0, angular=direction*angular_vel)
                         else:
                             break
-
+                    turtle.reset_odometry()
+                    time.sleep(0.1)
+                    while not turtle.is_shutting_down():  #ride out of potentional colision
+                        tacho = turtle.get_odometry()
+                        #print(sqrt(pow(tacho[0], 2)+pow(tacho[1], 2)))
+                        if (sqrt(pow(tacho[0], 2)+pow(tacho[1], 2)) < RIDE_OUT_OF_COLLISION_DIST/100):
+                            turtle.cmd_velocity(linear=linear_vel, angular=0)
+                        else:
+                            break
+                    turtle.cmd_velocity(linear=0, angular=0)
                     state = CORIGATING
                     life_phase = "corigating"
+                    turtle.reset_odometry()
+                    time.sleep(0.1)
+                    print("corigating now")
 
             elif state == CORIGATING: #turn in the direction of the poles but dont move, check their angle
                 if centroid_blue and centroid_red : #centroids detected
                     depth = centroidDist(depth_image, centroid_blue, centroid_red)
                     corr = centeringPoles(centroid_blue, centroid_red, slowing_down) #correct the drunk robot   
                     turtle.cmd_velocity(linear=0, angular=corr[1]*angular_vel*BOOST)
-                    if(corr[1] < CORRECTED):  #the robot is facing the poles
+                    #print("correction now:", corr)
+                    if(abs(corr[1]) < CORRECTED):  #the robot is facing the poles
+                        print("robot is facing the poles")
                         #check for angle of the centers of poles compared to robot
-                        angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
-                        print("poles angle:", par_ang)
-                        state = MOVE
-                        life_phase = "moving to poles"
-        
+                        turtle.cmd_velocity(linear=0, angular=0)
+                        time.sleep(1)
 
+                        angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
+                        print("pole paralell angle:", par_ang*RAD2DEG)
+                        state = MOVE
+                        
+                        if(par_ang*RAD2DEG < PAR_ANGLE_THRESHOLD): #the poles are more or less paralell to the robot, no correction needed
+                            state = MOVE
+                            life_phase = "moving to poles"
+                
+                        else: #here correct the angle of poles compared to robot
+                            life_phase = "angling"
+                            state = ANGLE_CORR
+                            tacho = turtle.get_odometry()
+                            print("corrected angle during coringating:", tacho[2]*RAD2DEG)
+                            corrected_from_corigating = tacho[2]
+
+            elif state == ANGLE_CORR:  #now correct for the angle of poles
+                if centroid_blue and centroid_red :
+                    turtle.cmd_velocity(linear=0, angular=0)
+                    time.sleep(1)
+                    direction = checkDir(centroid_blue, centroid_red) #check the dir in which to turn
+                    #check the angle we need to correct
+                    angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
+                    
+
+                    if depth_blue > depth_red: #red is closer, flip the wanted dir
+                        rotate_dir = -1*direction
+                    else: #turn the other way if the poles are 
+                        rotate_dir = direction
+                    #now rotate_dir shows which way to rotate -1 CW, 1 CCW
+                    print("so we turn ", 90 - par_ang*RAD2DEG + corrected_from_corigating*RAD2DEG, "right" if rotate_dir < 0 else "left", "and drive", min(depth_blue, depth_red)*par_ang )
+                    angle_to_rotate = pi/2 - abs(par_ang) + corrected_from_corigating
+                    angle_to_return = pi/2 - abs(par_ang) + corrected_from_corigating
+                    dist_to_drive = min(depth_blue, depth_red)*par_ang / 100  #the robot works in centimeters
+                    turtle.reset_odometry()
+                    time.sleep(0.1)
+                    print("rotating the angle to align with axis of poles")
+                    while not turtle.is_shutting_down():  #rotate the requested angle
+                        tacho = turtle.get_odometry()
+                        #print("Turned deg: ", tacho[2])
+                        if(abs(tacho[2]) < angle_to_rotate ):
+                            turtle.cmd_velocity(linear=0, angular=rotate_dir*angular_vel)
+                        else:
+                            break
+                        time.sleep(0.01)
+                    print("moving to align")
+                    while not turtle.is_shutting_down():  #move the requested dist
+                        tacho = turtle.get_odometry()
+                        #print("Ujetá vzdálenost píčo: ", sqrt(pow(tacho[0], 2)+pow(tacho[1], 2)))
+                        if (sqrt(pow(tacho[0], 2)+pow(tacho[1], 2)) < dist_to_drive):
+                            turtle.cmd_velocity(linear=linear_vel, angular=0)
+                        else:
+                            break
+                        time.sleep(0.01)
+                    turtle.reset_odometry()
+                    time.sleep(0.1)
+                    print("rotating back")
+                    while not turtle.is_shutting_down():  #rotate the requested angle
+                        tacho = turtle.get_odometry()
+                        #print("Turned deg back: ", tacho[2])
+                        if(abs(tacho[2]) < angle_to_rotate ):
+                            turtle.cmd_velocity(linear=0, angular=-1*rotate_dir*angular_vel)
+                        else:
+                            break
+                        time.sleep(0.01)
+                    state = ROTATE
+                    life_phase = "first"
+                    direction = -1*rotate_dir
+                    
 if __name__ == '__main__':
     main()
