@@ -30,7 +30,7 @@ WINDOW2 = 'mask'
 DRIVE = True  #disables the movement of the robot
 
 DEPTH_HYST = 40 #bulgarian constant for detecting if the poles belong together
-DEPTH_THR = 40  #threshold for stopping before obstacles
+DEPTH_THR = 38  #threshold for stopping before obstacles
 
 SLOW_SPEED = 0.5
 DONT_LOOK_THR = 3000 #1500ms since detecting the last pole starts detecting again
@@ -39,8 +39,11 @@ POLE_DIST_THRESH = 20  #threshold for dist between poles (in cm) - they belong t
 CORRECTED = 0.2  #threshold to detect when to stop centering
 PAR_ANGLE_THRESHOLD = 15  #threshold for deciding whether to correct for pole angle or not [in deg]
 RIDE_OUT_OF_COLLISION_DIST = 15  #distance to ride when running out of collision
+BULGANG = pi/4  #initial rotation for approximately pi/3
+NUM_ROT = 7 #rotate t
 
-BOOST = 4
+
+BOOST = 3
 P_FACTOR = 0.8
 CAM_FOV = 86
 DEG2RAD = 3.1415/180.0
@@ -103,10 +106,16 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     lower_blue = np.array([90, 150, 100])
     upper_blue = np.array([140, 255, 255])
 
-    # Threshold the HSV image to get only red and blue colors
+    # Define range of green color in HSV
+    lower_green = np.array([35, 70, 100])
+    upper_green = np.array([80, 160, 255])
+
+    # Threshold the HSV image to get only red, blue and green colors
     mask_red = cv2.inRange(hsv, lower_red1, upper_red1)
 
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+
+    mask_green = cv2.inRange(hsv, lower_green, upper_green)
 
     ignore_mask = np.zeros(frame.shape[:2], dtype="uint8")  # Start with a completely black mask
     cv2.rectangle(ignore_mask, (0, int(frame.shape[0] * 0.25)), (frame.shape[1], frame.shape[0]), 255, -1)  # Add a white rectangle covering the lower 3/4 of the mask
@@ -114,16 +123,25 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     # Apply the ignore mask to the color masks
     mask_red = cv2.bitwise_and(mask_red, mask_red, mask=ignore_mask)
     mask_blue = cv2.bitwise_and(mask_blue, mask_blue, mask=ignore_mask)
+    mask_green = cv2.bitwise_and(mask_green, mask_green, mask=ignore_mask)
+    
 
     # Bitwise-AND mask and original image to highlight the colors
     red_highlight = cv2.bitwise_and(frame, frame, mask=mask_red)
     blue_highlight = cv2.bitwise_and(frame, frame, mask=mask_blue)
+    green_highlight = cv2.bitwise_and(frame, frame, mask=mask_green)
 
     # Combine the highlighted red and blue in one frame
-    combined_highlight = cv2.addWeighted(red_highlight, 1, blue_highlight, 1, 0)
+    #Old: combined_highlight = cv2.addWeighted(red_highlight, 1, blue_highlight, 1, green_highlight, 1, 0)
+    # First, combine red and blue highlights
+    temp_combined = cv2.addWeighted(red_highlight, 1, blue_highlight, 1, 0)
+
+    # Then, combine the result with the green highlight
+    combined_highlight = cv2.addWeighted(temp_combined, 1, green_highlight, 1, 0)
 
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_green, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     def find_centroid(contour):
         M = cv2.moments(contour)
@@ -137,6 +155,14 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
     # Assuming the largest contour corresponds to the target color region
     centroid_blue = find_centroid(max(contours_blue, key=cv2.contourArea)) if contours_blue else None
     centroid_red = find_centroid(max(contours_red, key=cv2.contourArea)) if contours_red else None
+    sorted_contours_green = sorted(contours_green, key=cv2.contourArea, reverse=True)[:2]
+
+    # Initialize an empty list to store centroids
+    centroids_green = []
+
+    # Loop through the sorted contours (up to 2)
+    for contour in sorted_contours_green:
+        centroids_green.append(find_centroid(contour))
 
     # print("centroid red "+ str(centroid_red))
     # print("centroid blue "+ str(centroid_blue))
@@ -145,8 +171,12 @@ def colorMask(turtle): #function to detect the color of obstacles and return mas
         cv2.circle(frame, centroid_blue, 5, (255, 0, 0), -1)  #combined_highlight Blue dot
     if centroid_red:
         cv2.circle(frame, centroid_red, 5, (0, 140, 255), -1)  # Red dot
-    # Display the resulting frame
-    return frame, centroid_blue, centroid_red
+    if len(centroids_green) >= 2: #found more than one green centroids
+        cv2.circle(combined_highlight, centroids_green[0], 5, (0, 255, 0), -1)
+        cv2.circle(combined_highlight, centroids_green[1], 5, (0, 255, 0), -1)
+        return combined_highlight, centroids_green[0], centroids_green[1], 1
+
+    return frame, centroid_blue, centroid_red, 0 #frame
 
 
 def centeringPoles(blue, red, slow): #function centers poles with robot's trajectory
@@ -246,11 +276,14 @@ def main():
     global bumper
     global start
     global life_phase
+    rotate_cnt = 0
     slowing_down = False
     last_pole_time = 2000 # last depth of detected poles before ROTATE
     corr = [1,0]  #default val
     state = ROTATE #state machine to control the movement of the robot
     direction = 1
+    prev_ang = 0 #for rotating one sixth of full revolution in first life phase
+    centroid_dist_arr = []
     corrected_from_corigating = 0  #keep track of the angle when correcting the poles to center in standstill
     turtle = Turtlebot(pc=True, rgb=True)
     turtle.register_bumper_event_cb(bumper_cb)
@@ -292,7 +325,7 @@ def main():
         #im_color = cv2.applyColorMap(255 - image.astype(np.uint8), cv2.COLORMAP_JET)
         # show image
         cv2.imshow(WINDOW, depth_image)  #depth mask
-        maskaVole, centroid_blue, centroid_red = colorMask(turtle) 
+        maskaVole, centroid_blue, centroid_red, is_green = colorMask(turtle) 
         maskaVole = writeInfo(maskaVole)
         cv2.imshow(WINDOW2, maskaVole)
         cv2.waitKey(1)
@@ -307,6 +340,7 @@ def main():
                 #our brand new shity code, supported by: chatgpt
                 if centroid_blue and centroid_red : #centroids detected
                     depth = centroidDist(depth_image, centroid_blue, centroid_red)
+                    print(depth)
                     if state != ROTATE:
                         corr = centeringPoles(centroid_blue, centroid_red, slowing_down) #correct the drunk robot   
                     if depth != None : #the depth of the centroids is invalid
@@ -316,6 +350,9 @@ def main():
                             if (depth < SLOWING_THRESH) :
                                 slowing_down = True
                             if depth < DEPTH_THR: #close to the obstacle, switch the state machine
+                                if(is_green):
+                                    turtle.play_sound(2)
+                                    sys.exit()
                                 state = ROTATE
                                 direction = checkDir(centroid_blue, centroid_red) #sets the direction based on orientation of poles
                                 life_phase = "turning"
@@ -332,12 +369,50 @@ def main():
             # rotate fixed 90deg
             elif state == ROTATE:
                 if life_phase == "first":
-                    turtle.cmd_velocity(linear=0, angular=direction*angular_vel)
-
-                    if centroid_blue and centroid_red : #centroids detected
-                        state = MOVE
-                        life_phase = "moving to poles"
-                        print("now moving to poles")
+                    curr_ang = 0
+                    if rotate_cnt < NUM_ROT: #
+                        rotate_cnt += 1
+                        print("Counter: ",rotate_cnt)
+                        turtle.reset_odometry()
+                        time.sleep(0.1)
+                        while (BULGANG > abs(curr_ang) and not turtle.is_shutting_down()):
+                            curr_ang = turtle.get_odometry()[2]
+                            turtle.cmd_velocity(linear=0, angular=direction*angular_vel*BOOST)
+                        print("Done rotating for pi/4")
+                        turtle.cmd_velocity(linear=0, angular=0)
+                        time.sleep(0.5)
+                        if centroid_blue and centroid_red:
+                            centroid_dist_arr.append((rotate_cnt, (depth_blue+depth_red)/2))
+                            print("found some poles, saving", centroid_dist_arr[-1][0], centroid_dist_arr[-1][1])
+                    elif (rotate_cnt == NUM_ROT):  #evaluate the closest centroids
+                        turtle.play_sound(0)
+                        turtle.reset_odometry()
+                        min_dir = (0,1000) #default values
+                        print(centroid_dist_arr)
+                        for dir in centroid_dist_arr:
+                            if dir[1] < min_dir[1]:
+                                min_dir = dir
+                        if min_dir != (0,1000):
+                            curr_ang = 0
+                            print("rotating to closest poles", min_dir)
+                            for i in range(0, min_dir[0]):
+                                print(i)
+                                turtle.reset_odometry()
+                                curr_ang = 0
+                                while (BULGANG > abs(curr_ang) and not turtle.is_shutting_down()):
+                                    curr_ang = turtle.get_odometry()[2]
+                                    turtle.cmd_velocity(linear=0, angular=direction*angular_vel*BOOST)
+                                turtle.cmd_velocity(linear=0, angular=0)
+                                time.sleep(0.5)
+                            state = CORIGATING
+                            life_phase = "corigating"
+                            print("corigating")
+                            turtle.reset_odometry()
+                            time.sleep(1)
+                            
+                        else:
+                            sys.exit()
+                        
 
                 elif life_phase == "turning":
                     print("turning 90deg")
@@ -440,8 +515,8 @@ def main():
                         else:
                             break
                         time.sleep(0.01)
-                    state = ROTATE
-                    life_phase = "first"
+                    state = MOVE
+                    life_phase = "moving to poles"
                     direction = -1*rotate_dir
                     
 if __name__ == '__main__':
