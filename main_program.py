@@ -28,19 +28,22 @@ angular_vel = 0.35
 WINDOW = 'obstacles'
 WINDOW2 = 'mask'
 DRIVE = True  #disables the movement of the robot
+DEPTH_DEBUG = False
+
 
 DEPTH_HYST = 40 #bulgarian constant for detecting if the poles belong together
-DEPTH_THR = 38  #threshold for stopping before obstacles
+DEPTH_THR = 30  #threshold for stopping before obstacles
 
 SLOW_SPEED = 0.5
 DONT_LOOK_THR = 3000 #1500ms since detecting the last pole starts detecting again
-SLOWING_THRESH = 70  #distance at which the robot starts slowing down before poles 
+SLOWING_THRESH = 80  #distance at which the robot starts slowing down before poles 
 POLE_DIST_THRESH = 20  #threshold for dist between poles (in cm) - they belong together or no  
 CORRECTED = 0.2  #threshold to detect when to stop centering
-PAR_ANGLE_THRESHOLD = 25  #threshold for deciding whether to correct for pole angle or not [in deg]
+PAR_ANGLE_THRESHOLD = 20  #threshold for deciding whether to correct for pole angle or not [in deg]
 RIDE_OUT_OF_COLLISION_DIST = 15  #distance to ride when running out of collision
 BULGANG = 9*pi/40  #initial rotation for approximately pi/3
 NUM_ROT = 7 #rotate t
+BACK_OFF_DIST = 5 #reverse drive from pylons
 
 
 BOOST = 3
@@ -186,9 +189,11 @@ def centeringPoles(blue, red): #function centers poles with robot's trajectory
     error = (FRAME - error ) * P_FACTOR
     correction[1] = error/320
     return correction    
-def filterAvg(col_depths):
+
+def filterAvg(col_depths): #function to filter out the depth data (take out max, min and calculate average fo the rest)
     blue_depths = [pair[0] for pair in col_depths]
     red_depths = [pair[1] for pair in col_depths]
+    par_angs = [pair[2] for pair in col_depths]
 
     # Remove max and min from blue depths
     if len(blue_depths) > 2:
@@ -200,11 +205,17 @@ def filterAvg(col_depths):
         red_depths.remove(max(red_depths))
         red_depths.remove(min(red_depths))
 
+    # Remove max and min from paralel angles
+    if len(par_angs) > 2:
+        par_angs.remove(max(par_angs))
+        par_angs.remove(min(par_angs))
+
     # Calculate the averages
     depth_blue = sum(blue_depths) / len(blue_depths) if blue_depths else 0
     depth_red = sum(red_depths) / len(red_depths) if red_depths else 0
+    par_ang = sum(par_angs) / len(par_angs) if par_angs else 0
 
-    return depth_blue, depth_red
+    return depth_blue, depth_red, par_ang
 
 def calcDepthAvg(depth_image, centroid):
     # Define the height of the area to sample around the centroid
@@ -251,7 +262,7 @@ def centroidParams(depth_image, centroid_blue, centroid_red): #return the calcul
         #angle between the center of poles viewed from above compared to tangent line of the front of the robot
         paralel_angle = atan( abs(depth_blue-depth_red) / abs(distances[0]-distances[1]) )   #calculates the real distance between poles
         
-        print("found poles, angles:", angles, " dist:", abs(distances[0] - distances[1]) )
+        #print("found poles, angles:", angles, " dist:", abs(distances[0] - distances[1]) )
         #print("angle between poles", paralel_angle*RAD2DEG)
         return(angles, distances, paralel_angle, depth_blue, depth_red)
     return None
@@ -356,10 +367,22 @@ def main():
         #         centroid_blue = centroid_green1
         #         centroid_red = centroid_green2
         #         is_green = True                
-
         if centroid_blue and centroid_red :
             angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
-
+        if DEPTH_DEBUG:
+            print("paralell pole angle:", par_ang*RAD2DEG, "IPA blue,red", depth_blue, depth_red)
+            time.sleep(1)
+            direction = checkDir(centroid_blue, centroid_red) #check the dir in which to turn
+            if(avg_cnt < 5):
+                avg_cnt += 1
+                #check the angle we need to correct
+                angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
+                col_depths.append([depth_blue, depth_red, par_ang])
+            else:
+                avg_cnt = 0
+                depth_blue, depth_red, par_ang = filterAvg(col_depths)
+                print("filtered blue, red:",depth_blue, depth_red, "filtered paralel angle: ",RAD2DEG*par_ang)
+                col_depths = []
         if DRIVE:
             # command velocity
             #life_phase = "moving to poles"
@@ -415,7 +438,7 @@ def main():
             elif state == ROTATE:
                 if life_phase == "first":
                     curr_ang = 0
-                    if rotate_cnt < NUM_ROT: #
+                    if rotate_cnt <= NUM_ROT: #
                         print("Counter: ",rotate_cnt)
                         turtle.reset_odometry()
                         time.sleep(0.1)
@@ -424,12 +447,12 @@ def main():
                             print("found some poles, saving", centroid_dist_arr[-1][0], centroid_dist_arr[-1][1])
                         while (BULGANG > abs(curr_ang) and not turtle.is_shutting_down()):
                             curr_ang = turtle.get_odometry()[2]
-                            turtle.cmd_velocity(linear=0, angular=direction*angular_vel*BOOST)
+                            turtle.cmd_velocity(linear=0, angular=direction*angular_vel*2)
                         print("Done rotating for pi/4")
                         turtle.cmd_velocity(linear=0, angular=0)
                         time.sleep(0.5)
                         rotate_cnt += 1
-                    elif (rotate_cnt == NUM_ROT):  #evaluate the closest centroids
+                    elif (rotate_cnt > NUM_ROT):  #evaluate the closest centroids
                         turtle.play_sound(0)
                         turtle.reset_odometry()
                         min_dir = (0,1000) #default values
@@ -463,6 +486,16 @@ def main():
                 elif life_phase == "turning":
                     snail = False
                     ignore = False
+                    turtle.reset_odometry()
+                    time.sleep(0.1)
+                    print("Backing off")
+                    while not turtle.is_shutting_down():  #BACK OFF
+                        tacho = turtle.get_odometry()
+                        #print(sqrt(pow(tacho[0], 2)+pow(tacho[1], 2)))
+                        if (sqrt(pow(tacho[0], 2)+pow(tacho[1], 2)) < BACK_OFF_DIST/100):
+                            turtle.cmd_velocity(linear=-linear_vel, angular=0)
+                        else:
+                            break
                     print("turning 90deg")
                     while not turtle.is_shutting_down():  #rotate 90 deg
                         tacho = turtle.get_odometry()
@@ -510,10 +543,11 @@ def main():
                         avg_cnt += 1
                         #check the angle we need to correct
                         angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
-                        col_depths.append((depth_blue, depth_red))
+                        col_depths.append([depth_blue, depth_red, par_ang])
                     else:
                         avg_cnt = 0
-                        depth_blue, depth_red = filterAvg(col_depths)
+                        print("List of depths: ", col_depths)
+                        depth_blue, depth_red, par_ang = filterAvg(col_depths)
                         col_depths = []
                         
                     if depth_blue > depth_red: #red is closer, flip the wanted dir
@@ -523,9 +557,9 @@ def main():
                     #now rotate_dir shows which way to rotate -1 CW, 1 CCW
                     print("Poles are that far away: ",depth_blue, depth_red)
                     print("so we turn ", 90 - par_ang*RAD2DEG + corrected_from_corigating*RAD2DEG, "right" if rotate_dir < 0 else "left", "and drive", min(depth_blue, depth_red)*sin(par_ang) )
-                    angle_to_rotate = pi/2 - abs(par_ang) #+ corrected_from_corigating
-                    angle_to_return = pi/2 #+ abs(par_ang) #+ corrected_from_corigating
-                    dist_to_drive = (9/10)*(min(depth_blue, depth_red)*sin(par_ang)/100)  #the robot works in centimeters
+                    angle_to_rotate = 4*pi/10 - abs(par_ang) #+ corrected_from_corigating
+                    angle_to_return = 4*pi/10 #+ abs(par_ang) #+ corrected_from_corigating
+                    dist_to_drive = (min(depth_blue, depth_red)*sin(par_ang)/100)  #the robot works in centimeters
                     turtle.reset_odometry()
                     time.sleep(0.1)
                     print("rotating the angle to align with axis of poles")
