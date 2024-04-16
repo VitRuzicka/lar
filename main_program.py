@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# TODO: dont convert depth mask to int
-# make sure the depth map has y,x coordinates intead of x, y
-# make 
-
-
 from __future__ import print_function
 
 import cv2
@@ -21,7 +15,6 @@ CORIGATING = 3
 ANGLE_CORR = 4
 
 
-
 linear_vel = 0.2
 angular_vel = 0.35
 
@@ -32,14 +25,14 @@ DEPTH_DEBUG = False
 
 
 DEPTH_HYST = 40 #bulgarian constant for detecting if the poles belong together
-DEPTH_THR = 30  #threshold for stopping before obstacles
+DEPTH_THR = 28  #threshold for stopping before obstacles
 
-SLOW_SPEED = 0.5
+SLOW_SPEED = 0.4
 DONT_LOOK_THR = 3000 #1500ms since detecting the last pole starts detecting again
 SLOWING_THRESH = 80  #distance at which the robot starts slowing down before poles 
 POLE_DIST_THRESH = 20  #threshold for dist between poles (in cm) - they belong together or no  
 CORRECTED = 0.2  #threshold to detect when to stop centering
-PAR_ANGLE_THRESHOLD = 20  #threshold for deciding whether to correct for pole angle or not [in deg]
+PAR_ANGLE_THRESHOLD = 15  #threshold for deciding whether to correct for pole angle or not [in deg]
 RIDE_OUT_OF_COLLISION_DIST = 15  #distance to ride when running out of collision
 BULGANG = 9*pi/40  #initial rotation for approximately pi/3
 NUM_ROT = 7 #rotate t
@@ -191,6 +184,7 @@ def centeringPoles(blue, red): #function centers poles with robot's trajectory
     return correction    
 
 def filterAvg(col_depths): #function to filter out the depth data (take out max, min and calculate average fo the rest)
+    print("Filtering")
     blue_depths = [pair[0] for pair in col_depths]
     red_depths = [pair[1] for pair in col_depths]
     par_angs = [pair[2] for pair in col_depths]
@@ -330,8 +324,11 @@ def main():
     cv2.setMouseCallback(WINDOW2, click)
     turtle.play_sound(0) #play the sound - ready
 
-    # while not start:  #wait for the user to start the robot
-    #     time.sleep(0.1) 
+    while not turtle.is_shutting_down(): #wait for the user to start the robot
+        if start:
+            break 
+        print("Waiting for user input")
+        time.sleep(0.1) 
     turtle.play_sound(1)
     while not turtle.is_shutting_down():
         # get point cloud
@@ -401,20 +398,30 @@ def main():
                                 #detecting if robot is at the center of poles
                                 snail = True
                                 if(not ignore):
-
                                     turtle.cmd_velocity(linear=0, angular=0)
                                     turtle.reset_odometry()
                                     time.sleep(1)
+                                    #filtering data to decide whether to correct angle
+                                    if(avg_cnt < 2):
+                                        avg_cnt += 1
+                                        #check the angle we need to correct
+                                        angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
+                                        col_depths.append([depth_blue, depth_red, par_ang])
+                                        continue
+                                    else:
+                                        avg_cnt = 0
+                                        print("List of depths in drive: ", col_depths)
+                                        depth_blue, depth_red, par_ang = filterAvg(col_depths)
+                                        col_depths = []
                                     angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
-                                    print("pole paralell angle:", par_ang*RAD2DEG)
+                                    print("pole paralell angle in drive:", par_ang*RAD2DEG)
                                     state = MOVE
 
                                     if(par_ang*RAD2DEG > PAR_ANGLE_THRESHOLD): #here correct the angle of poles compared to robot
+                                        avg_cnt = 0
+                                        col_depths = []
                                         life_phase = "angling"
                                         state = ANGLE_CORR
-                                        tacho = turtle.get_odometry()
-                                        print("corrected angle during coringating:", tacho[2]*RAD2DEG)
-                                        corrected_from_corigating = tacho[2]
                                     else:
                                         ignore = True
                             if depth < DEPTH_THR: #close to the obstacle, switch the state machine
@@ -470,7 +477,7 @@ def main():
                                 curr_ang = 0
                                 while (BULGANG > abs(curr_ang) and not turtle.is_shutting_down()):
                                     curr_ang = turtle.get_odometry()[2]
-                                    turtle.cmd_velocity(linear=0, angular=direction*angular_vel*BOOST)
+                                    turtle.cmd_velocity(linear=0, angular=direction*angular_vel*2)
                                 turtle.cmd_velocity(linear=0, angular=0)
                                 time.sleep(0.5)
                             state = CORIGATING
@@ -478,7 +485,6 @@ def main():
                             print("corigating")
                             turtle.reset_odometry()
                             time.sleep(1)
-                            
                         else:
                             sys.exit()
                         
@@ -524,7 +530,7 @@ def main():
                 if centroid_blue and centroid_red : #centroids detected
                     depth = centroidDist(depth_image, centroid_blue, centroid_red)
                     corr = centeringPoles(centroid_blue, centroid_red) #correct the drunk robot   
-                    turtle.cmd_velocity(linear=0, angular=corr[1]*angular_vel*BOOST)
+                    turtle.cmd_velocity(linear=0, angular=corr[1]*angular_vel*BOOST*2)
                     #print("correction now:", corr)
                     if(abs(corr[1]) < CORRECTED):  #the robot is facing the poles
                         print("robot is facing the poles")
@@ -544,6 +550,7 @@ def main():
                         #check the angle we need to correct
                         angles , distances , par_ang, depth_blue, depth_red = centroidParams(depth_image, centroid_blue, centroid_red)
                         col_depths.append([depth_blue, depth_red, par_ang])
+                        continue
                     else:
                         avg_cnt = 0
                         print("List of depths: ", col_depths)
@@ -556,7 +563,7 @@ def main():
                         rotate_dir = direction
                     #now rotate_dir shows which way to rotate -1 CW, 1 CCW
                     print("Poles are that far away: ",depth_blue, depth_red)
-                    print("so we turn ", 90 - par_ang*RAD2DEG + corrected_from_corigating*RAD2DEG, "right" if rotate_dir < 0 else "left", "and drive", min(depth_blue, depth_red)*sin(par_ang) )
+                    print("so we turn ", 90 - par_ang*RAD2DEG, "right" if rotate_dir < 0 else "left", "and drive", min(depth_blue, depth_red)*sin(par_ang) )
                     angle_to_rotate = 4*pi/10 - abs(par_ang) #+ corrected_from_corigating
                     angle_to_return = 4*pi/10 #+ abs(par_ang) #+ corrected_from_corigating
                     dist_to_drive = (min(depth_blue, depth_red)*sin(par_ang)/100)  #the robot works in centimeters
@@ -565,8 +572,8 @@ def main():
                     print("rotating the angle to align with axis of poles")
                     while not turtle.is_shutting_down():  #rotate the requested angle
                         tacho = turtle.get_odometry()
-                        #print("Turned deg: ", tacho[2])
-                        if(abs(tacho[2]) < angle_to_rotate):
+                        #print("Turned deg: ", tacho[2], "Want to turn: ", angle_to_rotate)
+                        if(abs(tacho[2]) < abs(angle_to_rotate)): #without abs() I lost all of my brain cells
                             turtle.cmd_velocity(linear=0, angular=rotate_dir*angular_vel)
                         else:
                             break
@@ -586,7 +593,7 @@ def main():
                     while not turtle.is_shutting_down():  #rotate the requested angle
                         tacho = turtle.get_odometry()
                         #print("Turned deg back: ", tacho[2])
-                        if(abs(tacho[2]) < angle_to_return):
+                        if(abs(tacho[2]) < abs(angle_to_return)):
                             turtle.cmd_velocity(linear=0, angular=-1*rotate_dir*angular_vel)
                         else:
                             break
